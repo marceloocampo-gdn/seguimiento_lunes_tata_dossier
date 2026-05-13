@@ -1,0 +1,57 @@
+default_profile: prod
+
+shared:
+  google:
+    service_account_json: "secrets/google_sa.json"
+    sheet_url: "https://docs.google.com/spreadsheets/d/1YRn20azLODCc8B15QBFyAnvAA1QvNogwKxgqLr_5eTI/edit?" ## aca va la url de la hoja de google sheets
+
+
+### Este es el mail que debe ser editor en la hoja de Google = gsheet-runner@export-snow-to-drive.iam.gserviceaccount.com
+
+  snowflake:
+    service_account_json: "secrets/snowflake_sa.json"
+
+  queries:
+    
+    - file: "sql/Consulta1.sql" 
+      worksheet: "Plus"
+      range: "A2"
+
+    - file: "sql/Consulta2.sql"
+      worksheet: "PlusxUDN"
+      range: "A2"
+
+    - file: "sql/Consulta3.sql"
+      worksheet: "Pestaña_1_locales"
+      range: "A2"
+
+    - file: "sql/Consulta4.sql"
+      worksheet: "Pestaña_1_Historica"
+      range: "A2"
+
+    - file: "sql/Consulta5.sql"
+      worksheet: "Pestaña_1_M_Actual"
+      range: "A2"
+
+    - file: "sql/Consulta6.sql"
+      worksheet: "Mapa"
+      range: "A2"
+
+    - file: "sql/Consulta7.sql"
+      worksheet: "Acciones"
+      range: "A2"
+
+    - file: "sql/Consulta8.sql"
+      worksheet: "Pestaña_1_locales_Cerrado"
+      range: "A2"
+
+    - file: "sql/fecha.sql"
+      worksheet: "Fecha"
+      range: "A2"
+
+profiles:
+  test:
+    env: test
+
+  prod:
+    env: prod
