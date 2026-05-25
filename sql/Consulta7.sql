@@ -278,88 +278,192 @@ ORDER BY
 ,
 
 
-CUPONES_CUMPLE AS (
-
-    SELECT
-        CAMP_PROM_ID,
-        COALESCE(PAZOS_CODIGO_PROMO, VNTA_CODIGO_PROMOCION) AS VNTA_CODIGO_PROMOCION,
-        GEO_PROMOTION,
-        CAMP_PROM_FINI,
-        CAMP_PROM_FFIN,
-        CAMP_PROM_UNNG,
-        CAMP_PROM_TIPO,
-        CAMP_PROM_NOMBRE,
-        CAMP_PROM_ESPECIFICACION,
-        CAMP_PROM_OBJETIVO,
-        CAMP_PROM_APLICACION,
-        CAMP_PROM_CANAL
-    FROM
-        SANDBOX_PLUS.DWH.DETALLE_PROMO AS A
-        LEFT JOIN MSTRDB.DWH.LU_PROMO_RPM AS L on L.RPM_CODIGO_PROMO = A.VNTA_CODIGO_PROMOCION
-    WHERE
-        CAMP_PROM_OBJETIVO <> 'Informativo'
-        AND (CAMP_PROM_NOMBRE ILIKE '%CUMPL%')
-        AND CAMP_PROM_ID NOT IN (20, 26)
-    ORDER BY
-        CAMP_PROM_ID DESC
+CUMPLE AS (
+    SELECT DISTINCT
+        m.SOCI_SOCI_ID,                          -- ajustar nombre real del campo cliente
+        d.TIEM_DIA_ID                          AS FECHA_CUMPLE_USO,
+        d.TICKET
+    FROM 
+        MSTRDB.DWH.FT_VENTAS_DESCUENTOS_LINEAS d
+        INNER JOIN MSTRDB.DWH.FT_FDLN_MOVIMIENTOS m ON m.TICKET = d.TICKET AND m.fdln_movt_tipo = 'RP'
+    WHERE 
+        d.TIEM_DIA_ID >= '2026-01-01'
+        AND (d.VNTA_COD_DESCUENTO IN (3387 , 5000000006) OR d.VNTA_CODIGO_PROMOCION IN (3387 , 5000000006))
 
 ) 
 ,
-TICKETS_CUMPLE AS (
+IMPACTADOS_CUMPLE AS (
 
     SELECT
-        DISTINCT
-        TIEM_DIA_ID,
-        VNTA_COD_DESCUENTO,
-        TICKET,
-        CAMP_PROM_ID,
-        CAMP_PROM_NOMBRE,
-        CAMP_PROM_ESPECIFICACION,
-        CAMP_PROM_FINI,
-        CAMP_PROM_FFIN,
-        CAMP_PROM_UNNG,
-        CAMP_PROM_CANAL,
-        B.VNTA_CODIGO_PROMOCION
+        YEAR(FECHA_CARGA) AS ANIO,
+        MONTH(FECHA_CARGA) AS MES,
+        COUNT(DISTINCT(SOCI_SOCI_ID)) AS IMPACTADOS
     FROM
-        MSTRDB.DWH.FT_VENTAS_DESCUENTOS_LINEAS A
-         INNER JOIN CUPONES_CUMPLE B ON (
-                A.VNTA_COD_DESCUENTO::VARCHAR = B.VNTA_CODIGO_PROMOCION 
-                OR A.VNTA_CODIGO_PROMOCION::VARCHAR = B.VNTA_CODIGO_PROMOCION
-                OR A.VNTA_CODIGO::VARCHAR = B.VNTA_CODIGO_PROMOCION
-                OR A.VNTA_COD_DESCUENTO::VARCHAR = B.GEO_PROMOTION AND B.GEO_PROMOTION IS NOT NULL
-                OR A.VNTA_CODIGO_PROMOCION::VARCHAR = B.GEO_PROMOTION AND B.GEO_PROMOTION IS NOT NULL
-                OR A.VNTA_CODIGO::VARCHAR = B.GEO_PROMOTION AND B.GEO_PROMOTION IS NOT NULL
-            ) AND A.TIEM_DIA_ID BETWEEN B.CAMP_PROM_FINI AND B.CAMP_PROM_FFIN
+        SANDBOX_PLUS.DWH.DETALLE_CLIENTES
     WHERE
-        YEAR(TIEM_DIA_ID) >= YEAR(CURRENT_DATE) 
+        CAMP_PROM_ID = 19
+    GROUP BY
+        ALL
+
+)
+,
+-- ============================================================
+-- 2. Calendario de meses válidos entre 2025-01-01 y hoy
+--    Excluye marzo (3) y diciembre (12)
+-- ============================================================
+calendario_meses AS (
+    SELECT MES
+    FROM (
+        SELECT 
+            DATE_TRUNC('month', DATEADD('month', SEQ4(), '2025-01-01')) AS MES
+        FROM TABLE(GENERATOR(ROWCOUNT => 36))
+    )
+    WHERE MONTH(MES) NOT IN (3, 12)
+    ORDER BY
+        1 DESC
+
+)
+,
+
+-- ============================================================
+-- 3. Cruzar cada cliente x cada mes válido previo al cupón
+--    y rankear los 3 más recientes
+-- ============================================================
+meses_pre_validos AS (
+    SELECT
+        b.SOCI_SOCI_ID,
+        b.FECHA_CUMPLE_USO,
+        c.MES,
+        ROW_NUMBER() OVER (
+            PARTITION BY b.SOCI_SOCI_ID, b.FECHA_CUMPLE_USO
+            ORDER BY c.MES DESC
+        )                   AS RN
+    FROM CUMPLE b
+    JOIN calendario_meses c
+        ON  c.MES >= '2025-01-01'
+        AND c.MES <  DATE_TRUNC('month', b.FECHA_CUMPLE_USO)
+    QUALIFY
+        RN <= 3
+    ORDER BY
+        1,
+        3 DESC
+
+)
+,
+
+-- ============================================================
+-- 4. Consumo real por cliente-mes (puede no existir → 0)
+-- ============================================================
+consumo_mensual AS (
+    SELECT
+        m.SOCI_SOCI_ID,
+        DATE_TRUNC('month', v.TIEM_DIA_ID)  AS MES,
+        SUM(v.VNTA_IMPORTE_SIN_IVA)                  AS MONTO_MES,
+        ROUND(SUM(v.VNTA_IMPORTE_SIN_IVA - (v.VNTA_UNIDADES * v.VNTA_COSTO_PROM_POND))) AS GB1_MES
+    FROM 
+        MSTRDB.DWH.FT_FDLN_MOVIMIENTOS m
+        JOIN MSTRDB.DWH.FT_VENTAS v ON v.TICKET = m.TICKET AND M.FDLN_MOVT_TIPO = 'RP'
+        JOIN MSTRDB.DWH.LU_GEOG_LOCAL AS L ON V.GEOG_LOCL_ID = L.GEOG_LOCL_ID AND L.GEOG_UNNG_ID = 2
+    WHERE 
+        v.TIEM_DIA_ID >= '2025-01-01'
+    GROUP BY 1, 2
 
 ) 
+,
+
+-- ============================================================
+-- 5. LEFT JOIN: meses del calendario contra consumo real
+--    Si no compró → MONTO_MES = 0. Solo top 3 meses.
+-- ============================================================
+consumo_pre AS (
+    SELECT
+        mp.SOCI_SOCI_ID,
+        mp.FECHA_CUMPLE_USO,
+        COUNT(*)                                        AS MESES_VALIDOS,
+        SUM(COALESCE(cm.MONTO_MES, 0))                 AS VTA_TOTAL_PRE,
+        SUM(COALESCE(cm.GB1_MES, 0))                 AS GB1_TOTAL_PRE,
+        SUM(COALESCE(cm.MONTO_MES, 0)) / COUNT(*)      AS PROMEDIO_MENSUAL_PRE,
+        SUM(COALESCE(cm.GB1_MES, 0)) / COUNT(*)      AS GB1_MENSUAL_PRE,
+    FROM meses_pre_validos mp
+    LEFT JOIN consumo_mensual cm
+        ON  cm.SOCI_SOCI_ID = mp.SOCI_SOCI_ID
+        AND cm.MES        = mp.MES
+    WHERE 
+        mp.RN <= 3
+    GROUP BY 
+        1, 2
+
+) 
+,
+
+-- ============================================================
+-- 6. Consumo POST: 30 días corridos desde la fecha del cupón
+-- ============================================================
+consumo_post AS (
+    SELECT
+        b.SOCI_SOCI_ID,
+        b.FECHA_CUMPLE_USO,
+        SUM(v.VNTA_IMPORTE_SIN_IVA)  AS VTA_TOTAL_POST,
+        ROUND(SUM(v.VNTA_IMPORTE_SIN_IVA - (v.VNTA_UNIDADES * v.VNTA_COSTO_PROM_POND))) AS GB1_TOTAL_POST,
+        DATEADD('day', 30, b.FECHA_CUMPLE_USO) AS FECHA_FIN_ACUMULO
+    FROM 
+        CUMPLE b
+        JOIN MSTRDB.DWH.FT_FDLN_MOVIMIENTOS m ON m.SOCI_SOCI_ID = b.SOCI_SOCI_ID
+        JOIN MSTRDB.DWH.FT_VENTAS v           ON v.TICKET = m.TICKET AND M.FDLN_MOVT_TIPO = 'RP'
+        JOIN MSTRDB.DWH.LU_GEOG_LOCAL AS L ON V.GEOG_LOCL_ID = L.GEOG_LOCL_ID AND L.GEOG_UNNG_ID = 2
+    WHERE
+        v.TIEM_DIA_ID >= b.FECHA_CUMPLE_USO
+        AND v.TIEM_DIA_ID <  DATEADD('day', 30, b.FECHA_CUMPLE_USO)
+    GROUP BY 1, 2
+
+) 
+
+-- ============================================================
+-- 7. Join final + incremental
+-- ============================================================
+,
+FINAL AS (
+    SELECT
+        p.SOCI_SOCI_ID,
+        p.FECHA_CUMPLE_USO,
+        p.MESES_VALIDOS,
+        VTA_TOTAL_PRE,
+        GB1_TOTAL_PRE,
+        PROMEDIO_MENSUAL_PRE,
+        GB1_MENSUAL_PRE,
+        FECHA_FIN_ACUMULO,
+        COALESCE(po.VTA_TOTAL_POST, 0) AS VTA_TOTAL_POST_30_DIAS,
+        COALESCE(po.GB1_TOTAL_POST, 0) AS GB1_TOTAL_POST_30_DIAS,
+        COALESCE(VTA_TOTAL_POST_30_DIAS, 0) - p.PROMEDIO_MENSUAL_PRE  AS INCREMENTAL_VTA,
+        COALESCE(GB1_TOTAL_POST_30_DIAS, 0) - p.GB1_MENSUAL_PRE  AS INCREMENTAL_GB1,
+    FROM 
+        consumo_pre p
+        LEFT JOIN consumo_post po ON  po.SOCI_SOCI_ID = p.SOCI_SOCI_ID AND po.FECHA_CUMPLE_USO = p.FECHA_CUMPLE_USO
+    WHERE
+        FECHA_FIN_ACUMULO <= CURRENT_DATE - 1 
+    ORDER BY
+        p.FECHA_CUMPLE_USO DESC,
+        p.SOCI_SOCI_ID
+
+)
 ,
 ACCIONES_CUMPLE AS (
     SELECT
         'CUMPLE' AS ACCION,
         'CLIENTES ACTUALES' AS OBJETIVO,
-        YEAR(FV.TIEM_DIA_ID) ANIO,
-        MONTH(FV.TIEM_DIA_ID) AS MES,
-        COUNT(DISTINCT(FV.TICKET)) AS TICKETS,
-        ROUND(SUM(FV.VNTA_IMPORTE_SIN_IVA)) AS VTA_PROMO,
-        ROUND(SUM(FV.VNTA_IMPORTE_SIN_IVA - (FV.VNTA_UNIDADES * FV.VNTA_COSTO_PROM_POND))) AS GB1_PROMO,
+        YEAR(FECHA_CUMPLE_USO) ANIO,
+        MONTH(FECHA_CUMPLE_USO) AS MES,
+        COUNT(DISTINCT(SOCI_SOCI_ID)) AS TICKETS,
+        ROUND(SUM(INCREMENTAL_VTA)) AS VTA_PROMO,
+        ROUND(SUM(INCREMENTAL_GB1)) AS GB1_PROMO,
         ROUND(GB1_PROMO / VTA_PROMO, 2) AS MARGEN_PROMO,
-        COUNT(DISTINCT(FFM.SOCI_SOCI_ID)) AS SOCIOS_CON_PROMO
-    FROM
-        MSTRDB.DWH.FT_VENTAS AS FV
-        INNER JOIN MSTRDB.DWH.LU_ARTC_ARTICULO AS LAA ON FV.ARTC_ARTC_ID = LAA.ARTC_ARTC_ID
-        INNER JOIN MSTRDB.DWH.FT_FDLN_MOVIMIENTOS AS FFM ON FV.TICKET = FFM.TICKET AND FV.TIEM_DIA_ID = FFM.TIEM_DIA_ID
-    WHERE
-        YEAR(FV.TIEM_DIA_ID) >= YEAR(CURRENT_DATE)
-        AND FFM.FDLN_MOVT_TIPO = 'RP'
-        AND FV.TICKET IN (SELECT DISTINCT TICKET FROM TICKETS_CUMPLE)
-    GROUP BY
-        ALL
-ORDER BY
-    1 DESC,
-    2,
-    3
+        COUNT(DISTINCT(SOCI_SOCI_ID)) AS SOCIOS_CON_PROMO
+    FROM 
+        FINAL
+        LEFT JOIN IMPACTADOS_CUMPLE AS IC ON YEAR(FECHA_CUMPLE_USO) = IC.ANIO AND MONTH(FECHA_CUMPLE_USO) = IC.MES
+    GROUP BY ALL
+    ORDER BY 3, 4
+    
 ) 
 
 ,
